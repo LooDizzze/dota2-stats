@@ -1,0 +1,128 @@
+'use client';
+
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import Link from 'next/link';
+import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner';
+import { formatWinRate, winRateColor } from '@/lib/utils';
+
+interface TeamListing {
+  team_id: number;
+  name: string;
+  tag: string;
+  wins: number;
+  losses: number;
+  rating: number;
+  last_match_time: number;
+  logo_url?: string;
+}
+
+const THREE_MONTHS_AGO = Math.floor(Date.now() / 1000) - 90 * 24 * 60 * 60;
+
+export default function TeamsPage() {
+  const [search, setSearch] = useState('');
+
+  const { data: teams, isLoading, error } = useQuery({
+    queryKey: ['all-teams'],
+    queryFn: async () => {
+      const res = await fetch('https://api.opendota.com/api/teams');
+      return res.json() as Promise<TeamListing[]>;
+    },
+    staleTime: 1000 * 60 * 30,
+  });
+
+  if (isLoading) return <LoadingSpinner text="Loading teams..." />;
+  if (error) return <ErrorMessage message={(error as Error).message} />;
+
+  const filtered = (teams || [])
+    .filter((t) => t.last_match_time >= THREE_MONTHS_AGO)
+    .filter((t) => {
+      if (!search) return true;
+      const s = search.toLowerCase();
+      return t.name?.toLowerCase().includes(s) || t.tag?.toLowerCase().includes(s);
+    })
+    .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+
+  return (
+    <div>
+      <div style={{ marginBottom: '24px' }}>
+        <h1 style={{ fontSize: '26px', fontWeight: 800, color: 'var(--color-text)', marginBottom: '8px' }}>
+          Teams
+        </h1>
+        <p style={{ color: 'var(--color-muted)', fontSize: '14px' }}>
+          Teams active in the last 3 months, sorted by rating.
+        </p>
+      </div>
+
+      <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
+        <input
+          type="text"
+          placeholder="Search team..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{
+            padding: '8px 14px',
+            borderRadius: '6px',
+            border: '1px solid var(--color-border)',
+            background: 'var(--color-card)',
+            color: 'var(--color-text)',
+            fontSize: '13px',
+            width: '240px',
+            outline: 'none',
+          }}
+        />
+        <span style={{ fontSize: '13px', color: 'var(--color-muted)', alignSelf: 'center' }}>
+          {filtered.length} teams
+        </span>
+      </div>
+
+      <div className="card" style={{ padding: 0 }}>
+        <table className="dota-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Team</th>
+              <th style={{ textAlign: 'center' }}>Tag</th>
+              <th style={{ textAlign: 'center' }}>W</th>
+              <th style={{ textAlign: 'center' }}>L</th>
+              <th style={{ textAlign: 'right' }}>Win Rate</th>
+              <th style={{ textAlign: 'right' }}>Rating</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((t, i) => {
+              const total = t.wins + t.losses;
+              const rate = total > 0 ? (t.wins / total) * 100 : 0;
+              return (
+                <tr key={t.team_id}>
+                  <td style={{ color: 'var(--color-muted)', width: '40px' }}>{i + 1}</td>
+                  <td>
+                    <Link
+                      href={`/teams/${t.team_id}`}
+                      style={{ color: 'var(--color-text)', textDecoration: 'none', fontWeight: 600 }}
+                    >
+                      {t.name}
+                    </Link>
+                  </td>
+                  <td style={{ textAlign: 'center', color: 'var(--color-muted)', fontSize: '12px' }}>
+                    [{t.tag}]
+                  </td>
+                  <td style={{ textAlign: 'center', color: 'var(--color-radiant)', fontWeight: 600 }}>{t.wins}</td>
+                  <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{t.losses}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <span style={{ color: winRateColor(rate), fontWeight: 600 }}>
+                      {formatWinRate(rate)}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right', color: 'var(--color-gold)', fontWeight: 600 }}>
+                    {Math.round(t.rating || 0)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
