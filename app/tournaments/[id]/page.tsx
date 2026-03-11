@@ -1,10 +1,11 @@
 'use client';
 
+import { useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { getLeagueMatches, getLeagueTeams, getLeaguePicksBans, formatDuration } from '@/lib/opendota';
-import { computeHeroStatsFromExplorer, computeTeamStats, formatWinRate, winRateColor, formatDate } from '@/lib/utils';
+import { computeHeroStatsFromExplorer, computeTeamStats, computeMapNumbers, formatWinRate, winRateColor, formatDate } from '@/lib/utils';
 import StatCard from '@/components/StatCard';
 import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner';
 
@@ -30,6 +31,15 @@ export default function TournamentOverview() {
 
   const isLoading = matchesLoading || teamsLoading;
 
+  // Build teamId → name map from the dedicated /teams endpoint.
+  // This is the authoritative source; radiant_team_name / dire_team_name on
+  // individual match objects are often empty or missing in the OpenDota API.
+  const teamNames = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const t of (teams || [])) map[t.team_id] = t.name;
+    return map;
+  }, [teams]);
+
   if (isLoading) return <LoadingSpinner text="Loading tournament data..." />;
 
   const totalMatches = matches?.length || 0;
@@ -38,13 +48,17 @@ export default function TournamentOverview() {
   const radiantWinRate = totalMatches > 0 ? (radiantWins / totalMatches) * 100 : 0;
 
   const pbRows = picksBans?.rows || [];
-  const teamStats = matches ? computeTeamStats(matches, pbRows) : [];
+  const teamStats = matches ? computeTeamStats(matches, pbRows, teamNames) : [];
   const sortedTeams = [...teamStats].sort((a, b) => b.wins - a.wins || b.win_rate - a.win_rate);
 
   const heroStats = matches && picksBans
     ? computeHeroStatsFromExplorer(pbRows, totalMatches)
     : [];
   const topHeroes = [...heroStats].sort((a, b) => b.picks + b.bans - (a.picks + a.bans)).slice(0, 5);
+
+  // Map numbers — computed over ALL matches so a game 3 still shows "Map 3"
+  // even if games 1–2 aren't in the recent slice.
+  const mapNumbers = computeMapNumbers(matches || []);
 
   // Recent matches
   const recentMatches = [...(matches || [])].sort((a, b) => b.start_time - a.start_time).slice(0, 8);
@@ -176,21 +190,40 @@ export default function TournamentOverview() {
                   onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--color-card-hover)')}
                   onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                 >
-                  <div style={{ flex: 1 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
+                      {/* Map number badge */}
+                      {mapNumbers.has(match.match_id) && (
+                        <span style={{
+                          fontSize: '9px', fontWeight: 800, textTransform: 'uppercase',
+                          letterSpacing: '0.06em', color: 'var(--color-dim)',
+                          background: 'var(--color-border)', borderRadius: '3px',
+                          padding: '1px 5px', flexShrink: 0,
+                        }}>
+                          Map {mapNumbers.get(match.match_id)}
+                        </span>
+                      )}
+                      {/* Series label for Bo3 / Bo5 */}
+                      {match.series_type > 0 && (
+                        <span style={{ fontSize: '9px', color: 'var(--color-dim)', flexShrink: 0 }}>
+                          Bo{match.series_type === 1 ? 3 : 5}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize: '13px', color: 'var(--color-text)', fontWeight: 500 }}>
                       <span style={{ color: match.radiant_win ? 'var(--color-radiant)' : 'var(--color-muted)' }}>
-                        {match.radiant_team_name || 'Radiant'}
+                        {teamNames[match.radiant_team_id] || match.radiant_team_name || 'Unknown'}
                       </span>
                       <span style={{ color: 'var(--color-muted)', margin: '0 6px' }}>vs</span>
                       <span style={{ color: !match.radiant_win ? 'var(--color-radiant)' : 'var(--color-muted)' }}>
-                        {match.dire_team_name || 'Dire'}
+                        {teamNames[match.dire_team_id] || match.dire_team_name || 'Unknown'}
                       </span>
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--color-muted)', marginTop: '2px' }}>
                       {formatDate(match.start_time)} · {formatDuration(match.duration)}
                     </div>
                   </div>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--color-text)' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--color-text)', flexShrink: 0 }}>
                     {match.radiant_score} – {match.dire_score}
                   </div>
                 </div>

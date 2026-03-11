@@ -212,6 +212,28 @@ export interface TeamTournamentStats {
   second_pick_win_rate: number;
 }
 
+export interface UpcomingMatch {
+  timestamp: number;
+  team1: string;
+  team2: string;
+  bestof: number;
+  tournament: string;
+}
+
+export interface LiveMatch {
+  match_id: string;
+  league_id: number;
+  team_name_radiant: string;
+  team_name_dire: string;
+  game_time: number;
+  radiant_score: number;
+  dire_score: number;
+  radiant_lead: number;
+  spectators: number;
+}
+
+export type DateRanges = Record<number, { first: number; last: number }>;
+
 export interface ExplorerResult {
   rows: Record<string, unknown>[];
   rowCount: number;

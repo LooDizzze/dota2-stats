@@ -13,16 +13,152 @@ import {
 
 const BASE_URL = 'https://api.opendota.com/api';
 
-async function fetchAPI<T>(endpoint: string): Promise<T> {
-  const url = `${BASE_URL}${endpoint}`;
-  const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    throw new Error(`OpenDota API error: ${res.status} ${res.statusText}`);
-  }
-  return res.json();
+// ─── Cache ────────────────────────────────────────────────────────────────────
+// Module-level in-memory cache. Persists across React renders (browser) and
+// across SSR requests within the same Node process. Independent of React Query.
+
+interface CacheEntry {
+  data: unknown;
+  expiresAt: number;
 }
+
+const cache = new Map<string, CacheEntry>();
+
+// Per-endpoint TTLs (milliseconds). Constants rarely change; match data is
+// immutable once played; live/explorer data needs to be relatively fresh.
+const TTL_MS: Record<string, number> = {
+  constants:  60 * 60 * 1000,  // 1 hour   — heroes, items, patches
+  heroStats:  30 * 60 * 1000,  // 30 min   — pro pick/ban stats
+  match:      30 * 60 * 1000,  // 30 min   — completed match detail
+  leagues:    10 * 60 * 1000,  // 10 min   — league list / league detail
+  teams:       5 * 60 * 1000,  // 5 min    — team info
+  explorer:    5 * 60 * 1000,  // 5 min    — SQL queries
+  default:     5 * 60 * 1000,  // 5 min    — everything else
+};
+
+function getTTL(endpoint: string): number {
+  if (endpoint.startsWith('/constants/'))    return TTL_MS.constants;
+  if (endpoint === '/heroStats')             return TTL_MS.heroStats;
+  if (endpoint.startsWith('/matches/'))      return TTL_MS.match;
+  if (endpoint === '/leagues' || endpoint.startsWith('/leagues/')) return TTL_MS.leagues;
+  if (endpoint.startsWith('/teams'))         return TTL_MS.teams;
+  if (endpoint.startsWith('/explorer'))      return TTL_MS.explorer;
+  return TTL_MS.default;
+}
+
+// ─── In-flight deduplication ──────────────────────────────────────────────────
+// If two components call the same endpoint at the same time, they share one
+// pending Promise instead of firing two identical HTTP requests.
+
+const inFlight = new Map<string, Promise<unknown>>();
+
+// ─── Retry with exponential backoff ───────────────────────────────────────────
+
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Statuses worth retrying: rate-limited (429) and transient server errors (5xx).
+function isRetryable(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+async function fetchWithRetry<T>(url: string): Promise<T> {
+  let lastError: Error = new Error('Unknown fetch error');
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let res: Response;
+
+    try {
+      res = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+    } catch (networkError) {
+      // No response at all (offline, DNS failure, etc.) — retry
+      lastError = networkError instanceof Error ? networkError : new Error(String(networkError));
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw lastError;
+    }
+
+    if (res.ok) {
+      return res.json() as Promise<T>;
+    }
+
+    if (isRetryable(res.status) && attempt < MAX_RETRIES) {
+      // Respect the Retry-After header when present (OpenDota may set this on 429).
+      const retryAfterHeader = res.headers.get('Retry-After');
+      const delay = retryAfterHeader
+        ? parseInt(retryAfterHeader, 10) * 1000
+        : BASE_DELAY_MS * Math.pow(2, attempt);
+
+      // Clamp to a sensible max so the UI doesn't hang forever.
+      const clampedDelay = Math.min(delay, 15_000);
+
+      if (res.status === 429) {
+        console.warn(`[OpenDota] Rate limited. Retrying in ${clampedDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})…`);
+      } else {
+        console.warn(`[OpenDota] Server error ${res.status}. Retrying in ${clampedDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})…`);
+      }
+
+      await sleep(clampedDelay);
+      continue;
+    }
+
+    // Non-retryable error or retries exhausted.
+    if (res.status === 429) {
+      lastError = new Error('OpenDota rate limit exceeded — please wait a moment and try again.');
+    } else if (res.status === 404) {
+      lastError = new Error(`Not found (404): ${url}`);
+    } else {
+      lastError = new Error(`OpenDota API error: ${res.status} ${res.statusText}`);
+    }
+
+    throw lastError;
+  }
+
+  throw lastError;
+}
+
+// ─── Core fetch wrapper ───────────────────────────────────────────────────────
+
+async function fetchAPI<T>(endpoint: string): Promise<T> {
+  const now = Date.now();
+
+  // 1. Cache hit
+  const entry = cache.get(endpoint);
+  if (entry && entry.expiresAt > now) {
+    return entry.data as T;
+  }
+
+  // 2. Deduplicate concurrent requests for the same endpoint
+  const pending = inFlight.get(endpoint);
+  if (pending) {
+    return pending as Promise<T>;
+  }
+
+  // 3. Fetch (with retry/backoff)
+  const url = `${BASE_URL}${endpoint}`;
+  const promise = fetchWithRetry<T>(url)
+    .then((data) => {
+      cache.set(endpoint, { data, expiresAt: Date.now() + getTTL(endpoint) });
+      inFlight.delete(endpoint);
+      return data;
+    })
+    .catch((err: unknown) => {
+      inFlight.delete(endpoint);
+      throw err;
+    });
+
+  inFlight.set(endpoint, promise as Promise<unknown>);
+  return promise;
+}
+
+// ─── Public API functions ─────────────────────────────────────────────────────
 
 // Keywords that identify Tier 1 events regardless of OpenDota's tier classification
 const T1_KEYWORDS = [
@@ -134,13 +270,17 @@ export async function getLeagueDateRanges(): Promise<Record<number, { first: num
 export async function getTeamRecentPlayers(
   teamId: number
 ): Promise<{ account_id: number; games: number }[]> {
-  const ninetyDaysAgo = Math.floor(Date.now() / 1000) - 14 * 24 * 60 * 60;
+  // Round to the nearest hour so the SQL string (and its cache key) stays stable
+  // within each hour window, rather than changing every second.
+  const fourteenDaysAgo = Math.floor(Date.now() / 1000) - 14 * 24 * 60 * 60;
+  const hourAligned = Math.floor(fourteenDaysAgo / 3600) * 3600;
+
   const sql = `
     SELECT pm.account_id, COUNT(*) AS games
     FROM player_matches pm
     JOIN matches m ON pm.match_id = m.match_id
     WHERE (m.radiant_team_id = ${teamId} OR m.dire_team_id = ${teamId})
-      AND m.start_time > ${ninetyDaysAgo}
+      AND m.start_time > ${hourAligned}
       AND pm.account_id IS NOT NULL
       AND pm.account_id != 4294967295
     GROUP BY pm.account_id
@@ -156,12 +296,12 @@ export async function getTeamRecentPlayers(
 
 export async function getLeaguePicksBans(leagueid: number): Promise<ExplorerResult> {
   const sql = `
-    SELECT pb.match_id, pb.hero_id, pb.is_pick, pb.team, pb.order, m.radiant_win,
+    SELECT pb.match_id, pb.hero_id, pb.is_pick, pb.team, pb.ord, m.radiant_win,
            m.radiant_team_id, m.dire_team_id, m.start_time
     FROM picks_bans pb
     JOIN matches m ON pb.match_id = m.match_id
     WHERE m.leagueid = ${leagueid}
-    ORDER BY m.start_time DESC, pb.order ASC
+    ORDER BY m.start_time DESC, pb.ord ASC
   `;
   return explorerQuery(sql);
 }
@@ -180,6 +320,8 @@ export async function getLeaguePlayerStats(leagueid: number): Promise<ExplorerRe
   `;
   return explorerQuery(sql);
 }
+
+// ─── Pure helper functions (no API calls) ────────────────────────────────────
 
 // Build reverse map: item_id -> { name, dname, img }
 export function buildItemIdMap(

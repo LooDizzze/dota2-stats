@@ -99,7 +99,10 @@ export function computeHeroStatsFromExplorer(
 
 export function computeTeamStats(
   matches: LeagueMatch[],
-  picksBansRows: Record<string, unknown>[]
+  picksBansRows: Record<string, unknown>[],
+  // Optional pre-fetched map of team_id → name (e.g. from /leagues/{id}/teams).
+  // Takes priority over the name embedded in match objects, which is often empty.
+  teamNames: Record<number, string> = {}
 ): TeamTournamentStats[] {
   const teamMap: Record<number, TeamTournamentStats> = {};
 
@@ -151,7 +154,7 @@ export function computeTeamStats(
       if (!teamMap[t.id]) {
         teamMap[t.id] = {
           team_id: t.id,
-          team_name: t.name || `Team ${t.id}`,
+          team_name: teamNames[t.id] || t.name || `Team ${t.id}`,
           wins: 0,
           losses: 0,
           win_rate: 0,
@@ -215,6 +218,50 @@ export function computeTeamStats(
       second_pick_win_rate: spTotal > 0 ? (t.second_pick_wins / spTotal) * 100 : 0,
     };
   });
+}
+
+// Returns a map of match_id → map number within its series.
+// Primary key: series_id (provided by OpenDota for tournament matches).
+// Fallback: team-pair grouping with a 4-hour gap to separate distinct series.
+export function computeMapNumbers(matches: LeagueMatch[]): Map<number, number> {
+  const result = new Map<number, number>();
+  const SERIES_GAP_S = 4 * 60 * 60;
+
+  const withSeries: LeagueMatch[] = [];
+  const withoutSeries: LeagueMatch[] = [];
+  for (const m of matches) {
+    if (m.series_id) withSeries.push(m);
+    else withoutSeries.push(m);
+  }
+
+  // Group by series_id, sort chronologically, assign 1-based index
+  const bySeries = new Map<number, LeagueMatch[]>();
+  for (const m of withSeries) {
+    if (!bySeries.has(m.series_id)) bySeries.set(m.series_id, []);
+    bySeries.get(m.series_id)!.push(m);
+  }
+  for (const group of bySeries.values()) {
+    group.sort((a, b) => a.start_time - b.start_time);
+    group.forEach((m, i) => result.set(m.match_id, i + 1));
+  }
+
+  // Fallback: normalised team-pair key + time-gap heuristic
+  const byPair = new Map<string, LeagueMatch[]>();
+  for (const m of withoutSeries) {
+    const key = [m.radiant_team_id, m.dire_team_id].sort((a, b) => a - b).join('_');
+    if (!byPair.has(key)) byPair.set(key, []);
+    byPair.get(key)!.push(m);
+  }
+  for (const group of byPair.values()) {
+    group.sort((a, b) => a.start_time - b.start_time);
+    let mapNum = 1;
+    for (let i = 0; i < group.length; i++) {
+      if (i > 0 && group[i].start_time - group[i - 1].start_time > SERIES_GAP_S) mapNum = 1;
+      result.set(group[i].match_id, mapNum++);
+    }
+  }
+
+  return result;
 }
 
 export function getHeroName(heroId: number, heroes: HeroConstants): string {

@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// Cache the route response for 60 seconds and revalidate it in the background.
+// This applies at the CDN / edge layer when deployed (Vercel, etc.) and tells
+// Next.js not to re-execute the handler more often than once per minute.
+export const revalidate = 60;
+
 const LP_HEADERS = {
   'User-Agent': 'Dota2StatsTool/1.0 (personal project; contact: https://github.com/LooDizzze/dota2-stats)',
   'Accept-Encoding': 'gzip',
@@ -21,7 +26,9 @@ async function lpFetch(params: Record<string, string>) {
   for (const [k, v] of Object.entries({ ...params, format: 'json', formatversion: '2' })) {
     url.searchParams.set(k, v);
   }
-  const res = await fetch(url.toString(), { headers: LP_HEADERS, cache: 'no-store' });
+  // next: { revalidate: 60 } opts this into Next.js's Data Cache with ISR semantics:
+  // the response is served from cache and revalidated in the background after 60 s.
+  const res = await fetch(url.toString(), { headers: LP_HEADERS, next: { revalidate: 60 } });
   if (!res.ok) throw new Error(`LP API ${res.status}: ${await res.text().catch(() => '')}`);
   return res.json();
 }

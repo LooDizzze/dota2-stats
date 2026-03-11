@@ -1,10 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { getLeagueMatches, getLeaguePicksBans } from '@/lib/opendota';
+import { getLeagueMatches, getLeagueTeams, getLeaguePicksBans } from '@/lib/opendota';
 import { computeTeamStats, formatWinRate, winRateColor } from '@/lib/utils';
 import { TeamTournamentStats } from '@/lib/types';
 import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner';
@@ -39,17 +39,29 @@ export default function TeamsPage() {
     queryFn: () => getLeagueMatches(id),
   });
 
+  const { data: teams } = useQuery({
+    queryKey: ['league-teams', id],
+    queryFn: () => getLeagueTeams(id),
+  });
+
   const { data: picksBans, isLoading: pbLoading } = useQuery({
     queryKey: ['league-picks-bans', id],
     queryFn: () => getLeaguePicksBans(id),
     enabled: !!matches,
   });
 
+  // Build teamId → name map — must be a hook, so placed before early returns.
+  const teamNames = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const t of (teams || [])) map[t.team_id] = t.name;
+    return map;
+  }, [teams]);
+
   if (matchLoading) return <LoadingSpinner text="Loading team stats..." />;
   if (error) return <ErrorMessage message={(error as Error).message} />;
 
   const pbRows = picksBans?.rows || [];
-  const teamStats = matches ? computeTeamStats(matches, pbRows) : [];
+  const teamStats = matches ? computeTeamStats(matches, pbRows, teamNames) : [];
   const sorted = [...teamStats].sort((a, b) => {
     const av = a[sortKey] as number;
     const bv = b[sortKey] as number;
