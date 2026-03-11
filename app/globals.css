@@ -81,7 +81,15 @@ body {
 .card {
   background: var(--color-card);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: 10px;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(77,186,135,0.6), 0 0 0 3px rgba(77,186,135,0.15); }
+  50%       { box-shadow: 0 0 0 5px rgba(77,186,135,0), 0 0 0 3px rgba(77,186,135,0.15); }
+}
+.live-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
 }
 
 .badge-win {

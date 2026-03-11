@@ -43,9 +43,11 @@ export interface PlayerMatch {
   xp_per_min: number;
   last_hits: number;
   denies: number;
+  level?: number;
   net_worth?: number;
   hero_damage?: number;
   tower_damage?: number;
+  hero_healing?: number;
   obs_placed?: number;
   sen_placed?: number;
   personaname?: string;
@@ -91,6 +93,9 @@ export interface MatchDetail {
   objectives?: MatchObjective[];
   patch?: number;
   game_mode?: number;
+  radiant_gold_adv?: number[];
+  radiant_xp_adv?: number[];
+  cluster?: number;
 }
 
 export interface Hero {
