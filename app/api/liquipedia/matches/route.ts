@@ -28,7 +28,7 @@ async function lpFetch(params: Record<string, string>) {
   }
   // next: { revalidate: 60 } opts this into Next.js's Data Cache with ISR semantics:
   // the response is served from cache and revalidated in the background after 60 s.
-  const res = await fetch(url.toString(), { headers: LP_HEADERS, next: { revalidate: 60 } });
+  const res = await fetch(url.toString(), { headers: LP_HEADERS, next: { revalidate: 300 } });
   if (!res.ok) throw new Error(`LP API ${res.status}: ${await res.text().catch(() => '')}`);
   return res.json();
 }
@@ -206,29 +206,41 @@ export async function GET(request: NextRequest) {
   try {
     const allMatches: UpcomingMatch[] = [];
 
-    for (const name of tournamentNames) {
-      // Step 1: Find the main tournament page
-      const pageTitle = await findTournamentPage(name);
-      if (!pageTitle) {
-        debugInfo.push(`No LP page found for: ${name}`);
-        continue;
-      }
-      debugInfo.push(`Found: ${pageTitle} for "${name}"`);
+    const results = await Promise.all(
+      tournamentNames.map(async (name) => {
+        const localDebug: string[] = [];
+        const matches: UpcomingMatch[] = [];
 
-      // Step 2: Discover subpages
-      const subpages = await getSubpages(pageTitle);
-      debugInfo.push(`Subpages: ${subpages.join(', ') || '(none)'}`);
+        // Step 1: Find the main tournament page
+        const pageTitle = await findTournamentPage(name);
+        if (!pageTitle) {
+          localDebug.push(`No LP page found for: ${name}`);
+          return { matches, debug: localDebug };
+        }
+        localDebug.push(`Found: ${pageTitle} for "${name}"`);
 
-      // Step 3: Fetch all pages (main + subpages)
-      const allTitles = [pageTitle, ...subpages].slice(0, 15);
-      const pages = await fetchWikitexts(allTitles);
+        // Step 2: Discover subpages
+        const subpages = await getSubpages(pageTitle);
+        localDebug.push(`Subpages: ${subpages.join(', ') || '(none)'}`);
 
-      // Step 4: Parse matches from each page
-      for (const { title, wikitext } of pages) {
-        const parsed = parseMatchesFromWikitext(wikitext, name, now);
-        debugInfo.push(`${title}: ${parsed.length} future matches`);
-        allMatches.push(...parsed);
-      }
+        // Step 3: Fetch all pages (main + subpages)
+        const allTitles = [pageTitle, ...subpages].slice(0, 15);
+        const pages = await fetchWikitexts(allTitles);
+
+        // Step 4: Parse matches from each page
+        for (const { title, wikitext } of pages) {
+          const parsed = parseMatchesFromWikitext(wikitext, name, now);
+          localDebug.push(`${title}: ${parsed.length} future matches`);
+          matches.push(...parsed);
+        }
+
+        return { matches, debug: localDebug };
+      })
+    );
+
+    for (const { matches, debug } of results) {
+      allMatches.push(...matches);
+      debugInfo.push(...debug);
     }
 
     // Deduplicate and sort

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner';
@@ -19,8 +19,32 @@ interface TeamListing {
 
 const THREE_MONTHS_AGO = Math.floor(Date.now() / 1000) - 90 * 24 * 60 * 60;
 
+const LS_KEY = 'teams:hidden';
+
 export default function TeamsPage() {
   const [search, setSearch] = useState('');
+  const [hiddenTeamIds, setHiddenTeamIds] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(LS_KEY);
+      if (stored) setHiddenTeamIds(new Set(JSON.parse(stored)));
+    } catch {}
+  }, []);
+
+  function hideTeam(id: number) {
+    setHiddenTeamIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      try { localStorage.setItem(LS_KEY, JSON.stringify([...next])); } catch {}
+      return next;
+    });
+  }
+
+  function resetHidden() {
+    setHiddenTeamIds(new Set());
+    try { localStorage.removeItem(LS_KEY); } catch {}
+  }
 
   const { data: teams, isLoading, error } = useQuery({
     queryKey: ['all-teams'],
@@ -36,6 +60,7 @@ export default function TeamsPage() {
 
   const filtered = (teams || [])
     .filter((t) => t.last_match_time >= THREE_MONTHS_AGO)
+    .filter((t) => !hiddenTeamIds.has(t.team_id))
     .filter((t) => {
       if (!search) return true;
       const s = search.toLowerCase();
@@ -74,6 +99,23 @@ export default function TeamsPage() {
         <span style={{ fontSize: '13px', color: 'var(--color-muted)', alignSelf: 'center' }}>
           {filtered.length} teams
         </span>
+        {hiddenTeamIds.size > 0 && (
+          <button
+            onClick={resetHidden}
+            style={{
+              padding: '8px 12px',
+              borderRadius: '6px',
+              border: '1px solid var(--color-border)',
+              background: 'var(--color-card)',
+              color: 'var(--color-muted)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              marginLeft: 'auto',
+            }}
+          >
+            Reset hidden ({hiddenTeamIds.size})
+          </button>
+        )}
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -87,6 +129,7 @@ export default function TeamsPage() {
               <th style={{ textAlign: 'center' }}>L</th>
               <th style={{ textAlign: 'right' }}>Win Rate</th>
               <th style={{ textAlign: 'right' }}>Rating</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -94,7 +137,7 @@ export default function TeamsPage() {
               const total = t.wins + t.losses;
               const rate = total > 0 ? (t.wins / total) * 100 : 0;
               return (
-                <tr key={t.team_id}>
+                <tr key={t.team_id} className="group">
                   <td style={{ color: 'var(--color-muted)', width: '40px' }}>{i + 1}</td>
                   <td>
                     <Link
@@ -116,6 +159,27 @@ export default function TeamsPage() {
                   </td>
                   <td style={{ textAlign: 'right', color: 'var(--color-gold)', fontWeight: 600 }}>
                     {Math.round(t.rating || 0)}
+                  </td>
+                  <td style={{ textAlign: 'right', width: '32px' }}>
+                    <button
+                      onClick={() => hideTeam(t.team_id)}
+                      title="Hide this team"
+                      className="opacity-0 group-hover:opacity-100"
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--color-dim)',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        padding: '0 4px',
+                        lineHeight: 1,
+                        transition: 'opacity 0.15s',
+                      }}
+                      onMouseEnter={(e) => ((e.target as HTMLElement).style.color = 'var(--color-dire)')}
+                      onMouseLeave={(e) => ((e.target as HTMLElement).style.color = 'var(--color-dim)')}
+                    >
+                      ✕
+                    </button>
                   </td>
                 </tr>
               );

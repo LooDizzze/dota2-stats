@@ -39,6 +39,7 @@ export default function HeroImage({
       alt={hero.localized_name}
       width={width}
       height={height}
+      unoptimized
       style={{ borderRadius: 4, objectFit: 'cover' }}
       onError={(e) => {
         (e.target as HTMLImageElement).style.display = 'none';

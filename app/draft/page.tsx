@@ -150,6 +150,7 @@ function HeroImg({ heroId, size }: { heroId: number; size: number }) {
       alt={h.localized_name}
       width={size}
       height={Math.round(size * 0.56)}
+      unoptimized
       style={{ objectFit: 'cover', display: 'block' }}
       onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0'; }}
     />
@@ -387,6 +388,7 @@ function HeroPickerCard({ hero, stat, isSelected, usedIds, onClick }: {
         alt={hero.localized_name}
         width={62}
         height={35}
+        unoptimized
         style={{ display: 'block', objectFit: 'cover' }}
         onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
       />
