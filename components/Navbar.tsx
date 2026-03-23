@@ -77,6 +77,9 @@ export default function Navbar() {
           <NavLink href="/draft" active={pathname.startsWith('/draft')} highlight>
             Draft Analyzer
           </NavLink>
+          <NavLink href="/bets" active={pathname.startsWith('/bets')}>
+            Bet History
+          </NavLink>
         </div>
 
         {/* Right side info */}

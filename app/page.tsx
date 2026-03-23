@@ -25,7 +25,7 @@ function categorise(l: League, dates: DateRanges, now: number): Category {
   const d = dates[l.leagueid];
   if (d) {
     if (d.first > now) return 'upcoming';
-    if (d.last >= now - 7 * 24 * 60 * 60) return 'ongoing';
+    if (d.last >= now - 3 * 24 * 60 * 60) return 'ongoing';
     if (d.last >= recentCutoff) return 'finished';
     return 'previous';
   }
@@ -146,6 +146,10 @@ export default function HomePage() {
   }, [sorted, dates, now]);
 
   const ongoingLeagueIds = useMemo(() => new Set(ongoing.map((l) => l.leagueid)), [ongoing]);
+  const proLeagueIds = useMemo(
+    () => new Set([...ongoing, ...upcoming, ...finished].map((l) => l.leagueid)),
+    [ongoing, upcoming, finished]
+  );
 
   const matchQueryNames = useMemo(
     () => [...ongoing, ...upcoming].map((l) => l.name).join(','),
@@ -164,12 +168,12 @@ export default function HomePage() {
   });
 
   const liveProMatches = useMemo(() => {
-    if (!liveData || ongoingLeagueIds.size === 0) return [];
+    if (!liveData) return [];
     return liveData
-      .filter((m) => ongoingLeagueIds.has(m.league_id) && (m.team_name_radiant || m.team_name_dire))
+      .filter((m) => m.league_id > 0 && proLeagueIds.has(m.league_id) && m.team_name_radiant && m.team_name_dire && !m.deactivate_time)
       .sort((a, b) => b.spectators - a.spectators)
       .slice(0, 6);
-  }, [liveData, ongoingLeagueIds]);
+  }, [liveData, proLeagueIds]);
 
   const q = search.toLowerCase();
   const fs = (list: League[]) => !q ? list : list.filter((l) => l.name.toLowerCase().includes(q));

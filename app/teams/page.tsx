@@ -12,12 +12,8 @@ interface TeamListing {
   tag: string;
   wins: number;
   losses: number;
-  rating: number;
-  last_match_time: number;
   logo_url?: string;
 }
-
-const THREE_MONTHS_AGO = Math.floor(Date.now() / 1000) - 90 * 24 * 60 * 60;
 
 const LS_KEY = 'teams:hidden';
 
@@ -49,33 +45,31 @@ export default function TeamsPage() {
   const { data: teams, isLoading, error } = useQuery({
     queryKey: ['all-teams'],
     queryFn: async () => {
-      const res = await fetch('https://api.opendota.com/api/teams');
+      const res = await fetch('/api/backend-teams');
+      if (!res.ok) throw new Error('Backend unavailable');
       return res.json() as Promise<TeamListing[]>;
     },
-    staleTime: 1000 * 60 * 30,
+    staleTime: 1000 * 60 * 5,
   });
 
   if (isLoading) return <LoadingSpinner text="Loading teams..." />;
   if (error) return <ErrorMessage message={(error as Error).message} />;
 
   const filtered = (teams || [])
-    .filter((t) => t.last_match_time >= THREE_MONTHS_AGO)
     .filter((t) => !hiddenTeamIds.has(t.team_id))
     .filter((t) => {
       if (!search) return true;
       const s = search.toLowerCase();
       return t.name?.toLowerCase().includes(s) || t.tag?.toLowerCase().includes(s);
     })
-    .sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    .sort((a, b) => (b.wins + b.losses) - (a.wins + a.losses));
 
   return (
     <div>
       <div style={{ marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '26px', fontWeight: 800, color: 'var(--color-text)', marginBottom: '8px' }}>
-          Teams
-        </h1>
+        <h1 style={{ fontSize: '26px', fontWeight: 800, color: 'var(--color-text)', marginBottom: '8px' }}>Teams</h1>
         <p style={{ color: 'var(--color-muted)', fontSize: '14px' }}>
-          Teams active in the last 3 months, sorted by rating.
+          Teams from our match database, sorted by games played.
         </p>
       </div>
 
@@ -85,34 +79,13 @@ export default function TeamsPage() {
           placeholder="Search team..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{
-            padding: '8px 14px',
-            borderRadius: '6px',
-            border: '1px solid var(--color-border)',
-            background: 'var(--color-card)',
-            color: 'var(--color-text)',
-            fontSize: '13px',
-            width: '240px',
-            outline: 'none',
-          }}
+          style={{ padding: '8px 14px', borderRadius: '6px', border: '1px solid var(--color-border)', background: 'var(--color-card)', color: 'var(--color-text)', fontSize: '13px', width: '240px', outline: 'none' }}
         />
         <span style={{ fontSize: '13px', color: 'var(--color-muted)', alignSelf: 'center' }}>
           {filtered.length} teams
         </span>
         {hiddenTeamIds.size > 0 && (
-          <button
-            onClick={resetHidden}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '6px',
-              border: '1px solid var(--color-border)',
-              background: 'var(--color-card)',
-              color: 'var(--color-muted)',
-              fontSize: '12px',
-              cursor: 'pointer',
-              marginLeft: 'auto',
-            }}
-          >
+          <button onClick={resetHidden} style={{ padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--color-border)', background: 'var(--color-card)', color: 'var(--color-muted)', fontSize: '12px', cursor: 'pointer', marginLeft: 'auto' }}>
             Reset hidden ({hiddenTeamIds.size})
           </button>
         )}
@@ -127,8 +100,8 @@ export default function TeamsPage() {
               <th style={{ textAlign: 'center' }}>Tag</th>
               <th style={{ textAlign: 'center' }}>W</th>
               <th style={{ textAlign: 'center' }}>L</th>
+              <th style={{ textAlign: 'center' }}>Games</th>
               <th style={{ textAlign: 'right' }}>Win Rate</th>
-              <th style={{ textAlign: 'right' }}>Rating</th>
               <th></th>
             </tr>
           </thead>
@@ -140,46 +113,26 @@ export default function TeamsPage() {
                 <tr key={t.team_id} className="group">
                   <td style={{ color: 'var(--color-muted)', width: '40px' }}>{i + 1}</td>
                   <td>
-                    <Link
-                      href={`/teams/${t.team_id}`}
-                      style={{ color: 'var(--color-text)', textDecoration: 'none', fontWeight: 600 }}
-                    >
+                    <Link href={`/teams/${t.team_id}`} style={{ color: 'var(--color-text)', textDecoration: 'none', fontWeight: 600 }}>
                       {t.name}
                     </Link>
                   </td>
-                  <td style={{ textAlign: 'center', color: 'var(--color-muted)', fontSize: '12px' }}>
-                    [{t.tag}]
-                  </td>
+                  <td style={{ textAlign: 'center', color: 'var(--color-muted)', fontSize: '12px' }}>[{t.tag}]</td>
                   <td style={{ textAlign: 'center', color: 'var(--color-radiant)', fontWeight: 600 }}>{t.wins}</td>
                   <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{t.losses}</td>
+                  <td style={{ textAlign: 'center', color: 'var(--color-dim)' }}>{total}</td>
                   <td style={{ textAlign: 'right' }}>
-                    <span style={{ color: winRateColor(rate), fontWeight: 600 }}>
-                      {formatWinRate(rate)}
-                    </span>
-                  </td>
-                  <td style={{ textAlign: 'right', color: 'var(--color-gold)', fontWeight: 600 }}>
-                    {Math.round(t.rating || 0)}
+                    <span style={{ color: winRateColor(rate), fontWeight: 600 }}>{formatWinRate(rate)}</span>
                   </td>
                   <td style={{ textAlign: 'right', width: '32px' }}>
                     <button
                       onClick={() => hideTeam(t.team_id)}
-                      title="Hide this team"
+                      title="Hide"
                       className="opacity-0 group-hover:opacity-100"
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--color-dim)',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        padding: '0 4px',
-                        lineHeight: 1,
-                        transition: 'opacity 0.15s',
-                      }}
+                      style={{ background: 'none', border: 'none', color: 'var(--color-dim)', cursor: 'pointer', fontSize: '14px', padding: '0 4px', lineHeight: 1, transition: 'opacity 0.15s' }}
                       onMouseEnter={(e) => ((e.target as HTMLElement).style.color = 'var(--color-dire)')}
                       onMouseLeave={(e) => ((e.target as HTMLElement).style.color = 'var(--color-dim)')}
-                    >
-                      ✕
-                    </button>
+                    >✕</button>
                   </td>
                 </tr>
               );

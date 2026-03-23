@@ -6,6 +6,298 @@ import Image from 'next/image';
 import { getHeroImageUrl, getProHeroStats, getAllTeams, getTeamPlayers } from '@/lib/opendota';
 import { ProHeroStat, Team } from '@/lib/types';
 
+// ─── ML Prediction ──────────────────────────────────────────────────────────────
+
+interface MLPredictResult {
+  radiant_win_prob: number;
+  dire_win_prob: number;
+  has_team_data: boolean;
+  features_used: Record<string, number>;
+}
+
+async function fetchMLPredict(
+  radiantHeroIds: number[],
+  direHeroIds: number[],
+  radiantTeamId?: number,
+  direTeamId?: number,
+): Promise<MLPredictResult> {
+  const res = await fetch('/api/ml-predict', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      radiant_hero_ids: radiantHeroIds,
+      dire_hero_ids: direHeroIds,
+      radiant_team_id: radiantTeamId ?? null,
+      dire_team_id: direTeamId ?? null,
+    }),
+  });
+  if (!res.ok) throw new Error('ML service unavailable');
+  return res.json();
+}
+
+// Generates human-readable reasons based on top features
+function getBetReasons(f: Record<string, number>, radiantFavored: boolean): string[] {
+  const reasons: string[] = [];
+
+  const wradv = f['radiant_winrate_advantage'];
+  if (wradv !== undefined && Math.abs(wradv) > 0.05) {
+    if (wradv > 0) reasons.push(`Radiant better form: +${(wradv * 100).toFixed(0)}% winrate advantage`);
+    else reasons.push(`Dire better form: +${(Math.abs(wradv) * 100).toFixed(0)}% winrate advantage`);
+  }
+
+  const radWR = f['radiant_recent_winrate'];
+  const direWR = f['dire_recent_winrate'];
+  if (radWR !== undefined && radWR !== 0.5 && direWR !== undefined && direWR !== 0.5) {
+    if (radiantFavored && radWR > 0.5)
+      reasons.push(`Radiant on hot streak (${(radWR * 100).toFixed(0)}% recent WR)`);
+    else if (!radiantFavored && direWR > 0.5)
+      reasons.push(`Dire on hot streak (${(direWR * 100).toFixed(0)}% recent WR)`);
+  }
+
+  const radDispel = f['radiant_basic_dispel_count'] ?? 0;
+  const dirDispel = f['dire_strong_dispel_count'] ?? 0;
+  if (radDispel > 0 && radiantFavored)
+    reasons.push(`Radiant draft has ${radDispel} dispel hero${radDispel > 1 ? 's' : ''} (key stat)`);
+  if (dirDispel > 0 && !radiantFavored)
+    reasons.push(`Dire draft has ${dirDispel} strong dispel hero${dirDispel > 1 ? 's' : ''}`);
+
+  const radMeta = f['radiant_meta_score'] ?? 0.5;
+  const direMeta = f['dire_meta_score'] ?? 0.5;
+  if (Math.abs(radMeta - direMeta) > 0.03) {
+    if (radMeta > direMeta && radiantFavored)
+      reasons.push(`Radiant heroes more meta (avg WR ${(radMeta * 100).toFixed(1)}% vs ${(direMeta * 100).toFixed(1)}%)`);
+    else if (direMeta > radMeta && !radiantFavored)
+      reasons.push(`Dire heroes more meta (avg WR ${(direMeta * 100).toFixed(1)}% vs ${(radMeta * 100).toFixed(1)}%)`);
+  }
+
+  const radSynergy = f['radiant_synergy_score'] ?? 0;
+  const direSynergy = f['dire_synergy_score'] ?? 0;
+  if (radSynergy > direSynergy && radiantFavored)
+    reasons.push(`Radiant draft has stronger synergies (${radSynergy}/3)`);
+  else if (direSynergy > radSynergy && !radiantFavored)
+    reasons.push(`Dire draft has stronger synergies (${direSynergy}/3)`);
+
+  const radMobility = f['dire_global_mobility_count'] ?? 0;
+  if (radMobility > 1 && !radiantFavored)
+    reasons.push(`Dire has ${radMobility} mobility heroes (map control)`);
+
+  return reasons.slice(0, 4);
+}
+
+function MLPredictionPanel({
+  radiantHeroIds, direHeroIds, radiantTeamId, direTeamId,
+  radiantTeamName, direTeamName,
+}: {
+  radiantHeroIds: number[];
+  direHeroIds: number[];
+  radiantTeamId?: number;
+  direTeamId?: number;
+  radiantTeamName?: string;
+  direTeamName?: string;
+}) {
+  const [oddsInput, setOddsInput] = useState('1.85');
+  const [bankroll, setBankroll] = useState('100');
+  const hasAnyPick = radiantHeroIds.length > 0 || direHeroIds.length > 0;
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['ml-predict', radiantHeroIds, direHeroIds, radiantTeamId, direTeamId],
+    queryFn: () => fetchMLPredict(radiantHeroIds, direHeroIds, radiantTeamId, direTeamId),
+    enabled: hasAnyPick,
+    staleTime: 0,
+    retry: false,
+  });
+
+  const allPicked = radiantHeroIds.length === 5 && direHeroIds.length === 5;
+  const radPct = data ? Math.round(data.radiant_win_prob * 100) : null;
+  const direPct = data ? Math.round(data.dire_win_prob * 100) : null;
+
+  // Betting math
+  const betInfo = useMemo(() => {
+    if (!data) return null;
+    const p = data.radiant_win_prob;
+    const radiantFavored = p >= 0.5;
+    const favProb = radiantFavored ? p : 1 - p;
+    const favName = radiantFavored ? (radiantTeamName || 'Radiant') : (direTeamName || 'Dire');
+    const favColor = radiantFavored ? 'var(--color-radiant)' : 'var(--color-dire)';
+
+    const odds = parseFloat(oddsInput) || 1.85;
+    const bank = parseFloat(bankroll) || 100;
+    const b = odds - 1; // net odds
+    const q = 1 - favProb;
+
+    const ev = favProb * odds - 1;
+    const breakEvenOdds = 1 / favProb;
+
+    // Kelly: f* = (b*p - q) / b
+    const kellyFrac = b > 0 ? Math.max(0, (b * favProb - q) / b) : 0;
+    const halfKellyFrac = kellyFrac / 2;
+    const kellyAmount = +(kellyFrac * bank).toFixed(2);
+    const halfKellyAmount = +(halfKellyFrac * bank).toFixed(2);
+
+    const SKIP_THRESHOLD = 0.54;
+    const reasons = getBetReasons(data.features_used, radiantFavored);
+
+    return { favProb, favName, favColor, breakEvenOdds, ev, kellyFrac, halfKellyFrac, kellyAmount, halfKellyAmount, radiantFavored, reasons, skip: favProb < SKIP_THRESHOLD, odds, bank };
+  }, [data, radiantTeamName, direTeamName, oddsInput, bankroll]);
+
+  return (
+    <div className="card" style={{ padding: '20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--color-text)' }}>
+          ML Win Prediction
+        </div>
+        <span style={{ fontSize: 11, color: 'var(--color-muted)', fontWeight: 400 }}>
+          CatBoost model · Wald TOP-15 features
+        </span>
+        {!allPicked && hasAnyPick && (
+          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: 'rgba(201,162,39,0.15)', color: 'var(--color-gold)', border: '1px solid rgba(201,162,39,0.3)', marginLeft: 'auto' }}>
+            partial draft ({radiantHeroIds.length + direHeroIds.length}/10 picks)
+          </span>
+        )}
+      </div>
+
+      {!hasAnyPick ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-muted)', fontSize: 13 }}>
+          Pick heroes above to get a prediction
+        </div>
+      ) : isLoading ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-muted)', fontSize: 13 }}>
+          Computing prediction...
+        </div>
+      ) : isError ? (
+        <div style={{ padding: '16px', background: 'rgba(192,57,43,0.08)', border: '1px solid rgba(192,57,43,0.25)', borderRadius: 8, fontSize: 13, color: '#e74c3c' }}>
+          ML service unavailable — start predict_api.py first
+        </div>
+      ) : data && radPct !== null && direPct !== null && betInfo ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+          {/* Probability bar */}
+          <div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ color: 'var(--color-radiant)', fontWeight: 800, fontSize: 22, minWidth: 52 }}>{radPct}%</span>
+              <div style={{ flex: 1, height: 14, background: 'var(--color-border)', borderRadius: 7, overflow: 'hidden', position: 'relative' }}>
+                <div style={{
+                  position: 'absolute', left: 0, top: 0, bottom: 0,
+                  width: `${data.radiant_win_prob * 100}%`,
+                  background: 'linear-gradient(90deg, var(--color-radiant), #3aa870)',
+                  borderRadius: '7px 0 0 7px',
+                  transition: 'width 0.5s ease',
+                }} />
+              </div>
+              <span style={{ color: 'var(--color-dire)', fontWeight: 800, fontSize: 22, minWidth: 52, textAlign: 'right' }}>{direPct}%</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--color-muted)' }}>
+              <span style={{ color: 'var(--color-radiant)', fontWeight: 600 }}>RADIANT</span>
+              <span>{radPct === direPct ? 'Even match' : radPct > direPct ? `Radiant favored +${radPct - direPct}%` : `Dire favored +${direPct - radPct}%`}</span>
+              <span style={{ color: 'var(--color-dire)', fontWeight: 600 }}>DIRE</span>
+            </div>
+          </div>
+
+          {/* Bet recommendation */}
+          <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--color-muted)', marginBottom: 12 }}>
+              Betting Recommendation
+            </div>
+
+            {/* Inputs: odds + bankroll */}
+            <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                <span style={{ fontSize: 10, color: 'var(--color-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>Bookmaker odds</span>
+                <input
+                  type="number"
+                  min="1.01" max="50" step="0.01"
+                  value={oddsInput}
+                  onChange={(e) => setOddsInput(e.target.value)}
+                  style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 14, fontWeight: 700, width: '100%', outline: 'none' }}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                <span style={{ fontSize: 10, color: 'var(--color-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>Bankroll ($)</span>
+                <input
+                  type="number"
+                  min="1" step="1"
+                  value={bankroll}
+                  onChange={(e) => setBankroll(e.target.value)}
+                  style={{ padding: '7px 10px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 14, fontWeight: 700, width: '100%', outline: 'none' }}
+                />
+              </label>
+            </div>
+
+            {betInfo.skip ? (
+              <div style={{ padding: '14px 16px', background: 'rgba(26,39,64,0.7)', borderRadius: 8, border: '1px solid var(--color-border)', textAlign: 'center' }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--color-muted)', marginBottom: 4 }}>SKIP THIS BET</div>
+                <div style={{ fontSize: 12, color: 'var(--color-dim)' }}>
+                  Model confidence {Math.round(betInfo.favProb * 100)}% — too close to 50/50 for positive EV
+                </div>
+              </div>
+            ) : betInfo.ev <= 0 ? (
+              <div style={{ padding: '14px 16px', background: 'rgba(192,57,43,0.08)', borderRadius: 8, border: '1px solid rgba(192,57,43,0.25)', textAlign: 'center' }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#e74c3c', marginBottom: 4 }}>NEGATIVE EV</div>
+                <div style={{ fontSize: 12, color: 'var(--color-dim)' }}>
+                  At {betInfo.odds} odds EV = {(betInfo.ev * 100).toFixed(1)}% · Min odds for +EV: <strong style={{ color: 'var(--color-gold)' }}>{betInfo.breakEvenOdds.toFixed(2)}</strong>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                {/* Main call */}
+                <div style={{ flex: 1, minWidth: 160, padding: '14px 16px', background: `rgba(${betInfo.radiantFavored ? '77,186,135' : '192,57,43'},0.1)`, borderRadius: 8, border: `1px solid ${betInfo.radiantFavored ? 'rgba(77,186,135,0.3)' : 'rgba(192,57,43,0.3)'}` }}>
+                  <div style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Bet on</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: betInfo.favColor, marginBottom: 4 }}>{betInfo.favName}</div>
+                  <div style={{ fontSize: 12, color: 'var(--color-muted)' }}>Win prob: <strong style={{ color: betInfo.favColor }}>{Math.round(betInfo.favProb * 100)}%</strong></div>
+                  <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 2 }}>EV: <strong style={{ color: '#4dba87' }}>+{(betInfo.ev * 100).toFixed(1)}%</strong></div>
+                </div>
+
+                {/* Kelly sizing */}
+                <div style={{ flex: 1, minWidth: 160, padding: '14px 16px', background: 'rgba(26,39,64,0.5)', borderRadius: 8, border: '1px solid var(--color-border)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Bet size (Kelly)</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Full Kelly:</span>
+                      <span style={{ fontWeight: 800, fontSize: 16, color: 'var(--color-gold)' }}>${betInfo.kellyAmount}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>½ Kelly <span style={{ color: 'var(--color-radiant)', fontSize: 10 }}>recommended</span>:</span>
+                      <span style={{ fontWeight: 800, fontSize: 18, color: 'var(--color-radiant)' }}>${betInfo.halfKellyAmount}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                      <span style={{ color: 'var(--color-dim)' }}>Min odds for +EV:</span>
+                      <span style={{ color: 'var(--color-gold)', fontWeight: 600 }}>{betInfo.breakEvenOdds.toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Reasons */}
+            {betInfo.reasons.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 600 }}>Why</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {betInfo.reasons.map((r, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: 'var(--color-text)' }}>
+                      <span style={{ color: betInfo.favColor, fontWeight: 700, marginTop: 1 }}>›</span>
+                      <span>{r}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Footer note */}
+          <div style={{ fontSize: 11, color: 'var(--color-dim)', padding: '8px 10px', background: 'rgba(26,39,64,0.5)', borderRadius: 5, borderLeft: '2px solid var(--color-border)' }}>
+            {data.has_team_data
+              ? 'Team winrate data from local DB included.'
+              : 'No team history in DB — winrate features use defaults. Select teams for better accuracy.'}
+            {!allPicked && ' Partial draft — prediction will change as more heroes are picked.'}
+            {' Model accuracy: ~58.5% on test data. Bet responsibly.'}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const ROLES = ['Carry', 'Support', 'Nuker', 'Disabler', 'Initiator', 'Jungler', 'Durable', 'Escape', 'Pusher'];
 
 const ATTR_DEFS = [
@@ -45,23 +337,58 @@ function useHeroData() {
   return { heroStats, heroConstants };
 }
 
-type SlotType = 'radiant_pick' | 'radiant_ban' | 'dire_pick' | 'dire_ban';
+// ─── CM Draft sequence (Radiant starts) ────────────────────────────────────────
+// R=Radiant, D=Dire  b=ban  p=pick
+// Rban Dban Dban Rban Dban Dban Rban | Rpick Dpick | Rban Rban Dban | Dpick Rpick Rpick Dpick Dpick Rpick | Rban Dban Dban Rban | Rpick Dpick
 
+type DraftTeam = 'radiant' | 'dire';
+type DraftAction = 'pick' | 'ban';
+interface DraftStep { team: DraftTeam; action: DraftAction; }
+
+const DRAFT_SEQUENCE: DraftStep[] = [
+  { team: 'radiant', action: 'ban'  }, // 0
+  { team: 'dire',    action: 'ban'  }, // 1
+  { team: 'dire',    action: 'ban'  }, // 2
+  { team: 'radiant', action: 'ban'  }, // 3
+  { team: 'dire',    action: 'ban'  }, // 4
+  { team: 'dire',    action: 'ban'  }, // 5
+  { team: 'radiant', action: 'ban'  }, // 6
+  { team: 'radiant', action: 'pick' }, // 7
+  { team: 'dire',    action: 'pick' }, // 8
+  { team: 'radiant', action: 'ban'  }, // 9
+  { team: 'radiant', action: 'ban'  }, // 10
+  { team: 'dire',    action: 'ban'  }, // 11
+  { team: 'dire',    action: 'pick' }, // 12
+  { team: 'radiant', action: 'pick' }, // 13
+  { team: 'radiant', action: 'pick' }, // 14
+  { team: 'dire',    action: 'pick' }, // 15
+  { team: 'dire',    action: 'pick' }, // 16
+  { team: 'radiant', action: 'pick' }, // 17
+  { team: 'radiant', action: 'ban'  }, // 18
+  { team: 'dire',    action: 'ban'  }, // 19
+  { team: 'dire',    action: 'ban'  }, // 20
+  { team: 'radiant', action: 'ban'  }, // 21
+  { team: 'radiant', action: 'pick' }, // 22
+  { team: 'dire',    action: 'pick' }, // 23
+];
+
+// Indices in DRAFT_SEQUENCE for each slot type
+const RAD_PICK_IDX  = DRAFT_SEQUENCE.map((s, i) => s.team === 'radiant' && s.action === 'pick'  ? i : -1).filter((i) => i >= 0);
+const DIRE_PICK_IDX = DRAFT_SEQUENCE.map((s, i) => s.team === 'dire'    && s.action === 'pick'  ? i : -1).filter((i) => i >= 0);
+const RAD_BAN_IDX   = DRAFT_SEQUENCE.map((s, i) => s.team === 'radiant' && s.action === 'ban'   ? i : -1).filter((i) => i >= 0);
+const DIRE_BAN_IDX  = DRAFT_SEQUENCE.map((s, i) => s.team === 'dire'    && s.action === 'ban'   ? i : -1).filter((i) => i >= 0);
+
+const EMPTY_PICKS: (number | null)[] = Array(24).fill(null);
+const EMPTY_PLAYERS: (number | null)[] = [null, null, null, null, null];
+
+// Legacy Draft type kept for AnalysisPanel compat
+type SlotType = 'radiant_pick' | 'radiant_ban' | 'dire_pick' | 'dire_ban';
 interface Draft {
   radiant_picks: (number | null)[];
   dire_picks: (number | null)[];
   radiant_bans: (number | null)[];
   dire_bans: (number | null)[];
 }
-
-const EMPTY_DRAFT: Draft = {
-  radiant_picks: [null, null, null, null, null],
-  dire_picks: [null, null, null, null, null],
-  radiant_bans: [null, null, null, null, null, null, null],
-  dire_bans: [null, null, null, null, null, null, null],
-};
-
-const EMPTY_PLAYERS: (number | null)[] = [null, null, null, null, null];
 
 // ─── Team Picker ───────────────────────────────────────────────────────────────
 
@@ -418,76 +745,42 @@ function HeroPickerCard({ hero, stat, isSelected, usedIds, onClick }: {
 
 export default function DraftPage() {
   const { heroStats, heroConstants } = useHeroData();
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
-  const [selectedSlot, setSelectedSlot] = useState<{ type: SlotType; index: number } | null>(null);
+  // picks[i] = heroId at DRAFT_SEQUENCE[i], null = not yet picked
+  const [picks, setPicks] = useState<(number | null)[]>([...EMPTY_PICKS]);
   const [heroSearch, setHeroSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
-
   const [radiantTeam, setRadiantTeam] = useState<Team | null>(null);
   const [direTeam, setDireTeam] = useState<Team | null>(null);
-  const [radiantAssignments, setRadiantAssignments] = useState<(number | null)[]>([...EMPTY_PLAYERS]);
-  const [direAssignments, setDireAssignments] = useState<(number | null)[]>([...EMPTY_PLAYERS]);
-  const [importedFrom, setImportedFrom] = useState<string | null>(null);
+  const [firstPick, setFirstPick] = useState<'radiant' | 'dire'>('radiant');
 
-  // Load draft imported from a match page
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem('dota2stats_draft_import');
-      if (!raw) return;
-      localStorage.removeItem('dota2stats_draft_import');
-      const data = JSON.parse(raw);
-      setDraft({
-        radiant_picks: (data.radiant_picks || [null,null,null,null,null]).slice(0, 5),
-        dire_picks:    (data.dire_picks    || [null,null,null,null,null]).slice(0, 5),
-        radiant_bans:  (data.radiant_bans  || Array(7).fill(null)).slice(0, 7),
-        dire_bans:     (data.dire_bans     || Array(7).fill(null)).slice(0, 7),
-      });
-      const label = [data.radiant_name, data.dire_name].filter(Boolean).join(' vs ');
-      if (label) setImportedFrom(label);
-    } catch {
-      // ignore parse errors
-    }
-  }, []);
+  // When dire has first pick, invert radiant/dire in every step
+  const sequence = useMemo(() =>
+    firstPick === 'radiant'
+      ? DRAFT_SEQUENCE
+      : DRAFT_SEQUENCE.map((s) => ({ ...s, team: s.team === 'radiant' ? 'dire' : 'radiant' } as DraftStep)),
+    [firstPick]
+  );
 
-  const { data: radiantPlayersRaw } = useQuery({
-    queryKey: ['team-players', radiantTeam?.team_id],
-    queryFn: () => getTeamPlayers(radiantTeam!.team_id) as Promise<TeamPlayer[]>,
-    enabled: !!radiantTeam,
-    staleTime: 1000 * 60 * 10,
-  });
+  const radPickIdx  = useMemo(() => sequence.map((s, i) => s.team === 'radiant' && s.action === 'pick' ? i : -1).filter((i) => i >= 0), [sequence]);
+  const direPickIdx = useMemo(() => sequence.map((s, i) => s.team === 'dire'    && s.action === 'pick' ? i : -1).filter((i) => i >= 0), [sequence]);
+  const radBanIdx   = useMemo(() => sequence.map((s, i) => s.team === 'radiant' && s.action === 'ban'  ? i : -1).filter((i) => i >= 0), [sequence]);
+  const direBanIdx  = useMemo(() => sequence.map((s, i) => s.team === 'dire'    && s.action === 'ban'  ? i : -1).filter((i) => i >= 0), [sequence]);
 
-  const { data: direPlayersRaw } = useQuery({
-    queryKey: ['team-players', direTeam?.team_id],
-    queryFn: () => getTeamPlayers(direTeam!.team_id) as Promise<TeamPlayer[]>,
-    enabled: !!direTeam,
-    staleTime: 1000 * 60 * 10,
-  });
-
-  const radiantPlayers = useMemo<TeamPlayer[] | null>(() => {
-    if (!radiantTeam || !radiantPlayersRaw) return null;
-    const current = (radiantPlayersRaw as TeamPlayer[]).filter((p) => p.is_current_team_member);
-    return current.length > 0 ? current : (radiantPlayersRaw as TeamPlayer[]).slice(0, 10);
-  }, [radiantTeam, radiantPlayersRaw]);
-
-  const direPlayers = useMemo<TeamPlayer[] | null>(() => {
-    if (!direTeam || !direPlayersRaw) return null;
-    const current = (direPlayersRaw as TeamPlayer[]).filter((p) => p.is_current_team_member);
-    return current.length > 0 ? current : (direPlayersRaw as TeamPlayer[]).slice(0, 10);
-  }, [direTeam, direPlayersRaw]);
+  // current step = first unfilled slot
+  const currentStep = picks.findIndex((v) => v === null);
+  const isDone = currentStep === -1;
+  const step = isDone ? 24 : currentStep;
+  const currentAction = isDone ? null : sequence[step];
 
   const proStats = heroStats.data || [];
   const heroConst = heroConstants.data || {};
 
-  // All heroes sorted by localized_name within each attr group
-  const allHeroes = useMemo(() => {
-    return Object.values(heroConst).sort((a, b) => a.localized_name.localeCompare(b.localized_name));
-  }, [heroConst]);
+  const allHeroes = useMemo(
+    () => Object.values(heroConst).sort((a, b) => a.localized_name.localeCompare(b.localized_name)),
+    [heroConst]
+  );
 
-  const usedHeroIds = useMemo(() => {
-    const s = new Set<number>();
-    [...draft.radiant_picks, ...draft.dire_picks, ...draft.radiant_bans, ...draft.dire_bans].forEach((id) => { if (id) s.add(id); });
-    return s;
-  }, [draft]);
+  const usedHeroIds = useMemo(() => new Set(picks.filter(Boolean) as number[]), [picks]);
 
   const statsById = useMemo(() => {
     const m: Record<number, ProHeroStat> = {};
@@ -495,7 +788,6 @@ export default function DraftPage() {
     return m;
   }, [proStats]);
 
-  // Heroes grouped by attr, filtered by search/role (but NOT removed if used — shown as faded)
   const heroByAttr = useMemo(() => {
     const groups: Record<string, typeof allHeroes> = { str: [], agi: [], int: [], all: [] };
     for (const h of allHeroes) {
@@ -508,100 +800,125 @@ export default function DraftPage() {
     return groups;
   }, [allHeroes, heroSearch, roleFilter]);
 
-  const totalVisible = ATTR_DEFS.reduce((n, a) => n + heroByAttr[a.key].length, 0);
-
-  function selectHero(heroId: number) {
-    if (!selectedSlot) return;
-    setDraft((prev) => {
-      const next = { ...prev };
-      if (selectedSlot.type === 'radiant_pick') { const a = [...prev.radiant_picks]; a[selectedSlot.index] = heroId; next.radiant_picks = a; }
-      else if (selectedSlot.type === 'dire_pick') { const a = [...prev.dire_picks]; a[selectedSlot.index] = heroId; next.dire_picks = a; }
-      else if (selectedSlot.type === 'radiant_ban') { const a = [...prev.radiant_bans]; a[selectedSlot.index] = heroId; next.radiant_bans = a; }
-      else { const a = [...prev.dire_bans]; a[selectedSlot.index] = heroId; next.dire_bans = a; }
-      return next;
-    });
-    // Auto-advance to next empty slot
-    const key = selectedSlot.type === 'radiant_pick' ? 'radiant_picks' : selectedSlot.type === 'dire_pick' ? 'dire_picks' : selectedSlot.type === 'radiant_ban' ? 'radiant_bans' : 'dire_bans';
-    const arr = draft[key] as (number | null)[];
-    const nextEmpty = arr.findIndex((v, i) => i > selectedSlot.index && v === null);
-    if (nextEmpty !== -1) setSelectedSlot({ type: selectedSlot.type, index: nextEmpty });
-    else setSelectedSlot(null);
+  function pickHero(heroId: number) {
+    if (isDone || usedHeroIds.has(heroId)) return;
+    setPicks((prev) => { const next = [...prev]; next[step] = heroId; return next; });
   }
 
-  function clearSlot(type: SlotType, index: number) {
-    setDraft((prev) => {
-      const next = { ...prev };
-      if (type === 'radiant_pick') { const a = [...prev.radiant_picks]; a[index] = null; next.radiant_picks = a; }
-      else if (type === 'dire_pick') { const a = [...prev.dire_picks]; a[index] = null; next.dire_picks = a; }
-      else if (type === 'radiant_ban') { const a = [...prev.radiant_bans]; a[index] = null; next.radiant_bans = a; }
-      else { const a = [...prev.dire_bans]; a[index] = null; next.dire_bans = a; }
-      return next;
-    });
-    if (type === 'radiant_pick') setRadiantAssignments((prev) => { const a = [...prev]; a[index] = null; return a; });
-    else if (type === 'dire_pick') setDireAssignments((prev) => { const a = [...prev]; a[index] = null; return a; });
+  function undo() {
+    const lastFilled = [...picks].reverse().findIndex((v) => v !== null);
+    if (lastFilled === -1) return;
+    const idx = picks.length - 1 - lastFilled;
+    setPicks((prev) => { const next = [...prev]; next[idx] = null; return next; });
   }
 
   function clearAll() {
-    setDraft(EMPTY_DRAFT); setSelectedSlot(null);
-    setRadiantTeam(null); setDireTeam(null);
-    setRadiantAssignments([...EMPTY_PLAYERS]); setDireAssignments([...EMPTY_PLAYERS]);
+    setPicks([...EMPTY_PICKS]);
     setHeroSearch('');
+    setRadiantTeam(null);
+    setDireTeam(null);
   }
 
-  const isLoading = heroStats.isLoading || heroConstants.isLoading;
+  // Build legacy Draft object for AnalysisPanel
+  const draft: Draft = useMemo(() => ({
+    radiant_picks: radPickIdx.map((i) => picks[i]),
+    dire_picks:    direPickIdx.map((i) => picks[i]),
+    radiant_bans:  radBanIdx.map((i) => picks[i]),
+    dire_bans:     direBanIdx.map((i) => picks[i]),
+  }), [picks, radPickIdx, direPickIdx, radBanIdx, direBanIdx]);
 
-  function DraftSide({ side }: { side: 'Radiant' | 'Dire' }) {
-    const isRad = side === 'Radiant';
-    const color = isRad ? 'var(--color-radiant)' : 'var(--color-dire)';
-    const picks = isRad ? draft.radiant_picks : draft.dire_picks;
-    const bans = isRad ? draft.radiant_bans : draft.dire_bans;
-    const pickType: SlotType = isRad ? 'radiant_pick' : 'dire_pick';
-    const banType: SlotType = isRad ? 'radiant_ban' : 'dire_ban';
-    const players = isRad ? radiantPlayers : direPlayers;
-    const assignments = isRad ? radiantAssignments : direAssignments;
-    const setAssignment = isRad
-      ? (i: number, v: number | null) => setRadiantAssignments((prev) => { const a = [...prev]; a[i] = v; return a; })
-      : (i: number, v: number | null) => setDireAssignments((prev) => { const a = [...prev]; a[i] = v; return a; });
-    const team = isRad ? radiantTeam : direTeam;
-    const setTeam = isRad ? setRadiantTeam : setDireTeam;
+  const isLoading = heroStats.isLoading || heroConstants.isLoading;
+  const totalVisible = ATTR_DEFS.reduce((n, a) => n + heroByAttr[a.key].length, 0);
+
+  // ── Draft Board ────────────────────────────────────────────────────────────
+
+  function SlotBox({ seqIdx, size = 52 }: { seqIdx: number; size?: number }) {
+    const heroId = picks[seqIdx];
+    const s = sequence[seqIdx];
+    const isCurrent = seqIdx === step && !isDone;
+    const isBan = s.action === 'ban';
+    const activeColor = s.team === 'radiant' ? 'var(--color-radiant)' : 'var(--color-dire)';
+    // eslint-disable-next-line react-hooks/exhaustive-deps
 
     return (
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <TeamPicker side={side} team={team} onSelect={setTeam} />
-        <div style={{ fontSize: '13px', fontWeight: 700, color, marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{side}</div>
+      <div
+        title={heroId ? undefined : `Step ${seqIdx + 1}: ${s.team} ${s.action}`}
+        style={{
+          position: 'relative',
+          width: size,
+          height: size * 0.56,
+          borderRadius: 3,
+          overflow: 'hidden',
+          border: isCurrent
+            ? `2px solid ${activeColor}`
+            : `1px solid ${heroId ? 'rgba(255,255,255,0.08)' : 'var(--color-border)'}`,
+          background: heroId ? 'transparent' : isBan ? 'rgba(192,57,43,0.06)' : 'rgba(26,39,64,0.4)',
+          boxShadow: isCurrent ? `0 0 10px ${activeColor}60` : 'none',
+          flexShrink: 0,
+          transition: 'box-shadow 0.2s',
+        }}
+      >
+        {heroId ? (
+          <>
+            <Image
+              src={getHeroImageUrl(Object.values(heroConst).find((h) => h.id === heroId)?.name || '')}
+              alt=""
+              width={size}
+              height={Math.round(size * 0.56)}
+              unoptimized
+              style={{ display: 'block', objectFit: 'cover', filter: isBan ? 'grayscale(80%) brightness(0.55)' : 'none' }}
+              onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+            />
+            {isBan && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ width: '70%', height: 2, background: 'rgba(192,57,43,0.9)', transform: 'rotate(-30deg)' }} />
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {isCurrent ? (
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: activeColor, animation: 'pulse 1.2s ease-in-out infinite' }} />
+            ) : (
+              <div style={{ fontSize: 9, color: 'var(--color-dim)', fontWeight: 600 }}>{isBan ? '✕' : '+'}</div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
-        <div style={{ fontSize: '10px', color: 'var(--color-muted)', marginBottom: '5px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Picks</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '12px' }}>
-          {picks.map((heroId, i) => {
-            const sel = selectedSlot?.type === pickType && selectedSlot.index === i;
-            return (
-              <PickSlotWithPlayer key={i} heroId={heroId} selected={sel}
-                onSlotClick={() => { if (sel) setSelectedSlot(null); else setSelectedSlot({ type: pickType, index: i }); }}
-                onClear={() => clearSlot(pickType, i)}
-                assignedPlayerId={assignments[i]} onAssignPlayer={(v) => setAssignment(i, v)} players={players}
-              />
-            );
-          })}
+  function DraftSideBoard({ team }: { team: 'radiant' | 'dire' }) {
+    const isRad = team === 'radiant';
+    const color = isRad ? 'var(--color-radiant)' : 'var(--color-dire)';
+    const pickIdxs = isRad ? radPickIdx : direPickIdx;
+    const banIdxs  = isRad ? radBanIdx  : direBanIdx;
+    const teamObj  = isRad ? radiantTeam : direTeam;
+    const setTeam  = isRad ? setRadiantTeam : setDireTeam;
+    const label    = isRad ? 'Radiant' : 'Dire';
+
+    return (
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {/* Team picker */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, color, textTransform: 'uppercase', letterSpacing: '0.07em' }}>{label}</span>
+          <TeamPicker side={label as 'Radiant' | 'Dire'} team={teamObj} onSelect={setTeam} />
         </div>
 
-        <div style={{ fontSize: '10px', color: 'var(--color-muted)', marginBottom: '5px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Bans</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
-          {bans.map((heroId, i) => {
-            const sel = selectedSlot?.type === banType && selectedSlot.index === i;
-            return (
-              <div key={i} style={{ position: 'relative' }}>
-                <HeroSlot heroId={heroId} size={48} isban selected={sel}
-                  onClick={() => { if (sel) setSelectedSlot(null); else setSelectedSlot({ type: banType, index: i }); }}
-                />
-                {heroId && (
-                  <button onClick={(e) => { e.stopPropagation(); clearSlot(banType, i); }}
-                    style={{ position: 'absolute', top: -4, right: -4, width: 13, height: 13, borderRadius: '50%', background: 'var(--color-dire)', border: 'none', color: '#fff', fontSize: 9, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
-                    ×
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        {/* Picks row */}
+        <div>
+          <div style={{ fontSize: 9, color: 'var(--color-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>PICKS</div>
+          <div style={{ display: 'flex', gap: 3 }}>
+            {pickIdxs.map((idx) => <SlotBox key={idx} seqIdx={idx} size={64} />)}
+          </div>
+        </div>
+
+        {/* Bans row */}
+        <div>
+          <div style={{ fontSize: 9, color: 'var(--color-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>BANS</div>
+          <div style={{ display: 'flex', gap: 3 }}>
+            {banIdxs.map((idx) => <SlotBox key={idx} seqIdx={idx} size={44} />)}
+          </div>
         </div>
       </div>
     );
@@ -610,50 +927,97 @@ export default function DraftPage() {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'wrap', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: 'var(--color-text)', marginBottom: '6px' }}>Live Draft Analyzer</h1>
-          <p style={{ color: 'var(--color-muted)', fontSize: '14px' }}>
-            Set teams, input picks &amp; bans — win rate analysis from recent pro matches.
-          </p>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: 'var(--color-text)', marginBottom: 4 }}>Draft Analyzer</h1>
+          <p style={{ color: 'var(--color-muted)', fontSize: 13 }}>Captain&apos;s Mode · click heroes in order</p>
         </div>
-        <button onClick={clearAll} style={{ padding: '10px 22px', borderRadius: 8, border: '2px solid #c0392b', background: 'rgba(192,57,43,0.15)', color: '#e74c3c', fontSize: 14, fontWeight: 700, cursor: 'pointer', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(192,57,43,0.28)')}
-          onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(192,57,43,0.15)')}>
-          New Draft / Clear All
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* First pick toggle */}
+          <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border)', fontSize: 12, fontWeight: 700 }}>
+            <button
+              onClick={() => { setFirstPick('radiant'); setPicks([...EMPTY_PICKS]); }}
+              style={{ padding: '7px 14px', border: 'none', cursor: 'pointer', background: firstPick === 'radiant' ? 'rgba(77,186,135,0.18)' : 'var(--color-card)', color: firstPick === 'radiant' ? 'var(--color-radiant)' : 'var(--color-muted)', transition: 'all 0.15s' }}
+            >
+              Radiant FP
+            </button>
+            <button
+              onClick={() => { setFirstPick('dire'); setPicks([...EMPTY_PICKS]); }}
+              style={{ padding: '7px 14px', border: 'none', cursor: 'pointer', background: firstPick === 'dire' ? 'rgba(192,57,43,0.18)' : 'var(--color-card)', color: firstPick === 'dire' ? 'var(--color-dire)' : 'var(--color-muted)', transition: 'all 0.15s', borderLeft: '1px solid var(--color-border)' }}
+            >
+              Dire FP
+            </button>
+          </div>
+          <button onClick={undo} disabled={picks.every((v) => v === null)}
+            style={{ padding: '8px 14px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-card)', color: 'var(--color-muted)', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+            ← Undo
+          </button>
+          <button onClick={clearAll}
+            style={{ padding: '8px 14px', borderRadius: 6, border: '1px solid rgba(192,57,43,0.4)', background: 'rgba(192,57,43,0.12)', color: '#e74c3c', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+            Reset
+          </button>
+        </div>
       </div>
 
-      {importedFrom && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: 'rgba(77,186,135,0.08)', border: '1px solid rgba(77,186,135,0.25)', borderRadius: 8, fontSize: 13 }}>
-          <span style={{ color: 'var(--color-radiant)', fontWeight: 600 }}>⚔ Draft loaded: <span style={{ color: 'var(--color-text)', fontWeight: 400 }}>{importedFrom}</span></span>
-          <button onClick={() => setImportedFrom(null)} style={{ background: 'none', border: 'none', color: 'var(--color-muted)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
-        </div>
-      )}
-
       {isLoading ? (
-        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--color-muted)' }}>Loading hero data...</div>
+        <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-muted)' }}>Loading hero data...</div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
           {/* Draft board */}
-          <div className="card" style={{ padding: '20px' }}>
-            <div style={{ display: 'flex', gap: '32px', flexWrap: 'wrap' }}>
-              <DraftSide side="Radiant" />
-              <div style={{ width: 1, background: 'var(--color-border)', alignSelf: 'stretch' }} />
-              <DraftSide side="Dire" />
-            </div>
-            <div style={{ marginTop: '14px', padding: '8px 12px', background: 'rgba(201,162,39,0.08)', borderRadius: 6, fontSize: '12px', color: selectedSlot ? 'var(--color-gold)' : 'var(--color-muted)' }}>
-              {selectedSlot
-                ? `Selecting: ${selectedSlot.type.replace(/_/g, ' ')} slot ${selectedSlot.index + 1} — click a hero below`
-                : 'Click a Pick or Ban slot, then click a hero to assign it. Numbers on heroes = pro picks (blue) / bans (red).'}
+          <div className="card" style={{ padding: 20 }}>
+            <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+              <DraftSideBoard team="radiant" />
+
+              {/* Center: step indicator */}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, paddingTop: 28, minWidth: 90 }}>
+                {isDone ? (
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--color-gold)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Draft</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-muted)', marginTop: 2 }}>Complete</div>
+                  </div>
+                ) : (
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 10, color: 'var(--color-muted)', marginBottom: 4 }}>Step {step + 1}/24</div>
+                    <div style={{
+                      fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em',
+                      color: currentAction!.team === 'radiant' ? 'var(--color-radiant)' : 'var(--color-dire)',
+                    }}>
+                      {currentAction!.team}
+                    </div>
+                    <div style={{
+                      marginTop: 4, padding: '3px 10px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                      textTransform: 'uppercase', letterSpacing: '0.06em',
+                      background: currentAction!.action === 'ban' ? 'rgba(192,57,43,0.15)' : 'rgba(77,186,135,0.12)',
+                      color: currentAction!.action === 'ban' ? '#e74c3c' : 'var(--color-radiant)',
+                      border: `1px solid ${currentAction!.action === 'ban' ? 'rgba(192,57,43,0.3)' : 'rgba(77,186,135,0.25)'}`,
+                    }}>
+                      {currentAction!.action}
+                    </div>
+                  </div>
+                )}
+                <div style={{ fontSize: 9, color: 'var(--color-dim)', marginTop: 4 }}>
+                  {step}/{24}
+                </div>
+              </div>
+
+              <DraftSideBoard team="dire" />
             </div>
           </div>
 
-          {/* Hero picker — Dota 2 attribute grid */}
+          {/* Hero picker */}
           <div className="card" style={{ padding: '14px 16px' }}>
-            {/* Filters */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              {!isDone && (
+                <div style={{
+                  padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 700,
+                  background: currentAction!.action === 'ban' ? 'rgba(192,57,43,0.12)' : 'rgba(77,186,135,0.1)',
+                  color: currentAction!.action === 'ban' ? '#e74c3c' : 'var(--color-radiant)',
+                  border: `1px solid ${currentAction!.action === 'ban' ? 'rgba(192,57,43,0.3)' : 'rgba(77,186,135,0.25)'}`,
+                }}>
+                  {currentAction!.team === 'radiant' ? 'Radiant' : 'Dire'} · {currentAction!.action.toUpperCase()}
+                </div>
+              )}
               <input
                 type="text"
                 placeholder="Search hero..."
@@ -666,36 +1030,29 @@ export default function DraftPage() {
                 <option value="all">All Roles</option>
                 {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
-              <span style={{ fontSize: 11, color: 'var(--color-muted)', marginLeft: 'auto' }}>
-                {totalVisible} heroes
-              </span>
+              <span style={{ fontSize: 11, color: 'var(--color-muted)', marginLeft: 'auto' }}>{totalVisible} heroes</span>
             </div>
 
-            {/* 4-column attribute layout — grid ensures each column wraps correctly */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr)) 220px', gap: '12px', alignItems: 'start' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr)) 220px', gap: 12, alignItems: 'start' }}>
               {ATTR_DEFS.map(({ key, label, color, icon }) => {
                 const heroes = heroByAttr[key];
                 return (
                   <div key={key} style={{ minWidth: 0 }}>
-                    {/* Attribute header */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 8, paddingBottom: 6, borderBottom: `1px solid ${color}40` }}>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={icon} alt={label} width={14} height={14} style={{ imageRendering: 'crisp-edges' }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                      <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color, textTransform: 'uppercase' }}>
-                        {label}
-                      </span>
+                      <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color, textTransform: 'uppercase' }}>{label}</span>
                       <span style={{ fontSize: 10, color: 'var(--color-dim)', marginLeft: 'auto' }}>{heroes.length}</span>
                     </div>
-                    {/* Hero grid */}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
                       {heroes.map((h) => (
                         <HeroPickerCard
                           key={h.id}
                           hero={h}
                           stat={statsById[h.id]}
-                          isSelected={selectedSlot !== null}
+                          isSelected={!isDone}
                           usedIds={usedHeroIds}
-                          onClick={() => { if (selectedSlot && !usedHeroIds.has(h.id)) selectHero(h.id); }}
+                          onClick={() => { if (!isDone && !usedHeroIds.has(h.id)) pickHero(h.id); }}
                         />
                       ))}
                     </div>
@@ -706,16 +1063,26 @@ export default function DraftPage() {
           </div>
 
           {/* Analysis */}
-          <div className="card" style={{ padding: '20px' }}>
-            <div style={{ fontWeight: 700, fontSize: '15px', marginBottom: '16px', color: 'var(--color-text)' }}>
+          <div className="card" style={{ padding: 20 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 16, color: 'var(--color-text)' }}>
               Draft Analysis
-              <span style={{ fontSize: '11px', color: 'var(--color-muted)', fontWeight: 400, marginLeft: 8 }}>win rates from pro matches (OpenDota global stats)</span>
+              <span style={{ fontSize: 11, color: 'var(--color-muted)', fontWeight: 400, marginLeft: 8 }}>pro match win rates</span>
             </div>
             <AnalysisPanel draft={draft} proStats={proStats} heroConst={heroConst}
-              radiantPlayers={radiantPlayers} direPlayers={direPlayers}
-              radiantAssignments={radiantAssignments} direAssignments={direAssignments}
+              radiantPlayers={null} direPlayers={null}
+              radiantAssignments={EMPTY_PLAYERS} direAssignments={EMPTY_PLAYERS}
             />
           </div>
+
+          {/* ML Prediction */}
+          <MLPredictionPanel
+            radiantHeroIds={radPickIdx.map((i) => picks[i]).filter(Boolean) as number[]}
+            direHeroIds={direPickIdx.map((i) => picks[i]).filter(Boolean) as number[]}
+            radiantTeamId={radiantTeam?.team_id}
+            direTeamId={direTeam?.team_id}
+            radiantTeamName={radiantTeam?.name}
+            direTeamName={direTeam?.name}
+          />
 
         </div>
       )}

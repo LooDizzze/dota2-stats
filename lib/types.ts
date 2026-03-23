@@ -32,6 +32,13 @@ export interface PickBan {
   match_id?: number;
 }
 
+export interface WardLog {
+  time: number;
+  x: number;
+  y: number;
+  z?: number;
+}
+
 export interface PlayerMatch {
   account_id: number;
   player_slot: number; // 0-4 radiant, 128-132 dire
@@ -48,8 +55,17 @@ export interface PlayerMatch {
   hero_damage?: number;
   tower_damage?: number;
   hero_healing?: number;
+  damage_taken?: number;
   obs_placed?: number;
   sen_placed?: number;
+  camps_stacked?: number;
+  rune_pickups?: number;
+  // Per-minute timelines
+  lh_t?: number[];
+  gold_t?: number[];
+  // Ward placement logs
+  obs_log?: WardLog[];
+  sen_log?: WardLog[];
   personaname?: string;
   name?: string;
   // End-game items
@@ -225,11 +241,19 @@ export interface LiveMatch {
   league_id: number;
   team_name_radiant: string;
   team_name_dire: string;
+  team_id_radiant: number;
+  team_id_dire: number;
+  team_logo_radiant: string;
+  team_logo_dire: string;
   game_time: number;
+  game_state?: number;
+  deactivate_time?: number;
   radiant_score: number;
   dire_score: number;
   radiant_lead: number;
   spectators: number;
+  series_id: number;
+  players: { account_id: number; hero_id: number; team_slot: number; team: number }[];
 }
 
 export type DateRanges = Record<number, { first: number; last: number }>;

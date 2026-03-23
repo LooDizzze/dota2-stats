@@ -155,11 +155,64 @@ function PlayersTab({ players, isLoading, teamId }: { players: PlayerRow[] | und
   );
 }
 
+interface BackendPlayer {
+  account_id: number;
+  name: string;
+  games: number;
+  wins: number;
+  win_rate: number;
+  avg_kills: number;
+  avg_deaths: number;
+  avg_assists: number;
+  avg_kda: number;
+}
+
+interface BackendTeamDetail {
+  team_id: number;
+  name: string;
+  tag: string;
+  logo_url?: string;
+  wins: number;
+  losses: number;
+  avg_duration_min: number | null;
+  recent_form: boolean[]; // true=win
+  players: BackendPlayer[];
+}
+
+function RecentForm({ form }: { form: boolean[] }) {
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+      {form.map((won, i) => (
+        <div
+          key={i}
+          title={won ? 'Win' : 'Loss'}
+          style={{
+            width: 10, height: 10, borderRadius: 2,
+            background: won ? 'var(--color-radiant)' : 'var(--color-dire)',
+            opacity: 0.7 + (i / form.length) * 0.3,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function TeamPage() {
   const params = useParams();
   const teamId = Number(params.id);
   const [tab, setTab] = useState<Tab>('matches');
   const { data: heroes } = useHeroConstants();
+
+  const { data: backendTeam } = useQuery<BackendTeamDetail>({
+    queryKey: ['backend-team', teamId],
+    queryFn: async () => {
+      const r = await fetch(`/api/backend-teams/${teamId}`);
+      if (!r.ok) return null;
+      return r.json();
+    },
+    staleTime: 1000 * 60 * 5,
+    retry: false,
+  });
 
   const { data: team, isLoading: teamLoading, error } = useQuery({
     queryKey: ['team', teamId],
@@ -225,18 +278,35 @@ export default function TeamPage() {
 
       {/* Stats */}
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-        <StatCard label="Wins" value={team.wins || teamWins} color="var(--color-radiant)" />
-        <StatCard label="Losses" value={team.losses || teamLosses} color="var(--color-dire)" />
+        <StatCard label="Wins" value={backendTeam?.wins ?? team.wins ?? teamWins} color="var(--color-radiant)" />
+        <StatCard label="Losses" value={backendTeam?.losses ?? team.losses ?? teamLosses} color="var(--color-dire)" />
         <StatCard
           label="Win Rate"
           value={formatWinRate(winRate)}
           sub={`${totalMatches} matches`}
           color={winRate >= 50 ? 'var(--color-radiant)' : 'var(--color-dire)'}
         />
+        {backendTeam?.avg_duration_min && (
+          <StatCard label="Avg Duration" value={`${backendTeam.avg_duration_min}m`} color="var(--color-gold)" />
+        )}
         {team.rating && (
           <StatCard label="Rating" value={Math.round(team.rating)} color="var(--color-gold-bright)" />
         )}
       </div>
+
+      {/* Recent form from our DB */}
+      {backendTeam?.recent_form && backendTeam.recent_form.length > 0 && (
+        <div className="card" style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 16 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+            Recent Form (last {backendTeam.recent_form.length})
+          </span>
+          <RecentForm form={backendTeam.recent_form} />
+          <span style={{ fontSize: 12, color: 'var(--color-muted)', marginLeft: 8 }}>
+            {backendTeam.recent_form.filter(Boolean).length}W –{' '}
+            {backendTeam.recent_form.filter((x) => !x).length}L
+          </span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--color-border)', gap: '4px' }}>
@@ -393,7 +463,53 @@ export default function TeamPage() {
 
       {/* Players tab */}
       {tab === 'players' && (
-        <PlayersTab players={players as PlayerRow[] | undefined} isLoading={playersLoading} teamId={teamId} />
+        <>
+          {/* Our DB players — richer stats */}
+          {backendTeam?.players && backendTeam.players.length > 0 && (
+            <div className="card" style={{ padding: 0, marginBottom: 16 }}>
+              <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text)' }}>Players — Our DB</span>
+                <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>{backendTeam.wins + backendTeam.losses} matches tracked</span>
+              </div>
+              <table className="dota-table">
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    <th style={{ textAlign: 'center' }}>Games</th>
+                    <th style={{ textAlign: 'center' }}>W</th>
+                    <th style={{ textAlign: 'right' }}>Win Rate</th>
+                    <th style={{ textAlign: 'center' }}>K</th>
+                    <th style={{ textAlign: 'center' }}>D</th>
+                    <th style={{ textAlign: 'center' }}>A</th>
+                    <th style={{ textAlign: 'right' }}>KDA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {backendTeam.players.map((p) => {
+                    const wr = p.win_rate * 100;
+                    return (
+                      <tr key={p.account_id}>
+                        <td style={{ fontWeight: 600 }}>{p.name}</td>
+                        <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{p.games}</td>
+                        <td style={{ textAlign: 'center', color: 'var(--color-radiant)', fontWeight: 600 }}>{p.wins}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          <span style={{ fontWeight: 600, color: winRateColor(wr) }}>{formatWinRate(wr)}</span>
+                        </td>
+                        <td style={{ textAlign: 'center', color: 'var(--color-radiant)' }}>{p.avg_kills}</td>
+                        <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{p.avg_deaths}</td>
+                        <td style={{ textAlign: 'center', color: 'var(--color-text)' }}>{p.avg_assists}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: p.avg_kda >= 3 ? 'var(--color-gold)' : 'var(--color-text)' }}>
+                          {p.avg_kda.toFixed(2)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <PlayersTab players={players as PlayerRow[] | undefined} isLoading={playersLoading} teamId={teamId} />
+        </>
       )}
     </div>
   );
