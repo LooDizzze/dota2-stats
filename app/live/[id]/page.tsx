@@ -80,15 +80,21 @@ export default function LiveMatchPage() {
   const [oddsInput, setOddsInput] = useState('1.85');
   const [betOn, setBetOn] = useState<'team1' | 'team2'>('team1');
   const [bankroll, setBankroll] = useState(100);
+  const [customAmount, setCustomAmount] = useState('');
   const [saved, setSaved] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    try {
-      const b = localStorage.getItem('bets:bankroll');
-      if (b) setBankroll(parseFloat(b) || 100);
-    } catch {}
+    const sync = () => {
+      try {
+        const b = localStorage.getItem('bets:bankroll');
+        if (b) setBankroll(parseFloat(b) || 100);
+      } catch {}
+    };
+    sync();
+    window.addEventListener('bankroll-updated', sync);
+    return () => window.removeEventListener('bankroll-updated', sync);
   }, []);
 
   // Fetch all live matches, find this one
@@ -162,6 +168,8 @@ export default function LiveMatchPage() {
   const dire = match?.team_name_dire || 'Dire';
   const betOnName = betOn === 'team1' ? radiant : dire;
 
+  const finalAmount = customAmount ? parseFloat(customAmount) || kelly.halfKelly : kelly.halfKelly;
+
   function handleSaveBet() {
     if (!match) return;
     const bet: BetEntry = {
@@ -176,12 +184,19 @@ export default function LiveMatchPage() {
       team2Id: match.team_id_dire || undefined,
       mlProb: betProb,
       odds,
-      amount: kelly.halfKelly,
+      amount: finalAmount,
       ev: kelly.ev,
       result: 'pending',
     };
     const bets = loadBets();
     saveBets([bet, ...bets]);
+    // deduct from bankroll
+    const newBankroll = Math.max(0, bankroll - finalAmount);
+    setBankroll(newBankroll);
+    try {
+      localStorage.setItem('bets:bankroll', String(newBankroll));
+      window.dispatchEvent(new Event('bankroll-updated'));
+    } catch {}
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   }
@@ -450,6 +465,20 @@ export default function LiveMatchPage() {
             </div>
           )}
 
+          {/* Custom amount */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 10, color: 'var(--color-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
+              My amount ($) <span style={{ color: 'var(--color-dim)', textTransform: 'none', letterSpacing: 0 }}>— оставь пустым для ½ Kelly</span>
+            </div>
+            <input
+              type="number" min="0.01" step="0.5"
+              placeholder={`${kelly.halfKelly} (½ Kelly)`}
+              value={customAmount}
+              onChange={(e) => setCustomAmount(e.target.value)}
+              style={{ padding: '10px 14px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 18, fontWeight: 700, width: '100%', outline: 'none' }}
+            />
+          </div>
+
           {/* Save button */}
           <button
             onClick={handleSaveBet}
@@ -462,7 +491,7 @@ export default function LiveMatchPage() {
               transition: 'all 0.2s',
             }}
           >
-            {saved ? '✓ Saved to Bet History' : `Save Bet — $${kelly.halfKelly} on ${betOnName}`}
+            {saved ? '✓ Saved to Bet History' : `Save Bet — $${finalAmount} on ${betOnName}`}
           </button>
         </div>
       )}

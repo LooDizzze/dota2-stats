@@ -2,9 +2,48 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState, useEffect } from 'react';
 
 export default function Navbar() {
   const pathname = usePathname();
+  const [bankroll, setBankroll] = useState<number | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [addInput, setAddInput] = useState('');
+  const [editInput, setEditInput] = useState('');
+
+  useEffect(() => {
+    try { setBankroll(parseFloat(localStorage.getItem('bets:bankroll') || '100') || 100); } catch {}
+    const sync = () => {
+      try { setBankroll(parseFloat(localStorage.getItem('bets:bankroll') || '100') || 100); } catch {}
+    };
+    window.addEventListener('bankroll-updated', sync);
+    return () => window.removeEventListener('bankroll-updated', sync);
+  }, []);
+
+  function saveBankroll(v: number) {
+    setBankroll(v);
+    try {
+      localStorage.setItem('bets:bankroll', String(v));
+      window.dispatchEvent(new Event('bankroll-updated'));
+    } catch {}
+  }
+
+  function handleAdd() {
+    const v = parseFloat(addInput);
+    if (!v || v <= 0) { setAdding(false); return; }
+    saveBankroll((bankroll || 0) + v);
+    setAddInput('');
+    setAdding(false);
+  }
+
+  function handleEdit() {
+    const v = parseFloat(editInput);
+    if (!v || v <= 0) { setEditing(false); return; }
+    saveBankroll(v);
+    setEditInput('');
+    setEditing(false);
+  }
 
   return (
     <nav
@@ -82,10 +121,58 @@ export default function Navbar() {
           </NavLink>
         </div>
 
-        {/* Right side info */}
-        <div style={{ fontSize: '11px', color: 'var(--color-muted)', flexShrink: 0 }}>
-          Data: OpenDota API
-        </div>
+        {/* Bankroll */}
+        {bankroll !== null && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {adding ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  autoFocus
+                  type="number" min="1" step="1" placeholder="+ amount"
+                  value={addInput}
+                  onChange={(e) => setAddInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') setAdding(false); }}
+                  style={{ width: 90, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13, fontWeight: 700, outline: 'none' }}
+                />
+                <button onClick={handleAdd} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: 'var(--color-radiant)', color: '#000', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>OK</button>
+                <button onClick={() => setAdding(false)} style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'none', color: 'var(--color-muted)', fontSize: 12, cursor: 'pointer' }}>✕</button>
+              </div>
+            ) : (
+              <>
+                {editing ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input
+                      autoFocus
+                      type="number" min="1" step="1" placeholder="set balance"
+                      value={editInput}
+                      onChange={(e) => setEditInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleEdit(); if (e.key === 'Escape') setEditing(false); }}
+                      style={{ width: 90, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-radiant)', background: 'var(--color-bg)', color: 'var(--color-text)', fontSize: 13, fontWeight: 700, outline: 'none' }}
+                    />
+                    <button onClick={handleEdit} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: 'var(--color-radiant)', color: '#000', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>OK</button>
+                    <button onClick={() => setEditing(false)} style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'none', color: 'var(--color-muted)', fontSize: 12, cursor: 'pointer' }}>✕</button>
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => { setEditInput(String(bankroll)); setEditing(true); setAdding(false); }}
+                    title="Click to set balance"
+                    style={{ textAlign: 'right', cursor: 'pointer' }}
+                  >
+                    <div style={{ fontSize: 10, color: 'var(--color-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', lineHeight: 1 }}>Bankroll</div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--color-radiant)', lineHeight: 1.3 }}>${bankroll.toFixed(2)}</div>
+                  </div>
+                )}
+                {!editing && (
+                  <button
+                    onClick={() => { setAdding(true); setEditing(false); }}
+                    title="Add funds"
+                    style={{ width: 28, height: 28, borderRadius: '50%', border: '1px solid var(--color-border)', background: 'var(--color-card)', color: 'var(--color-muted)', fontSize: 18, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+                  >+</button>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </nav>
   );

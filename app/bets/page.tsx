@@ -359,17 +359,18 @@ export default function BetsPage() {
   useEffect(() => {
     setMounted(true);
     setBets(loadBets());
-    const saved = localStorage.getItem(LS_BANKROLL);
-    if (saved) setBankroll(saved);
+    const sync = () => {
+      const v = localStorage.getItem(LS_BANKROLL);
+      if (v) setBankroll(v);
+    };
+    sync();
+    window.addEventListener('bankroll-updated', sync);
+    return () => window.removeEventListener('bankroll-updated', sync);
   }, []);
 
   useEffect(() => {
     if (mounted) { saveBets(bets); }
   }, [bets, mounted]);
-
-  useEffect(() => {
-    if (mounted) { localStorage.setItem(LS_BANKROLL, bankroll); }
-  }, [bankroll, mounted]);
 
   const { data: teams = [] } = useQuery<BackendTeam[]>({
     queryKey: ['backend-teams'],
@@ -396,6 +397,20 @@ export default function BetsPage() {
   }
 
   function setResult(id: string, result: BetResult) {
+    const old = bets.find((b) => b.id === id);
+    if (!old || old.result === result) return;
+
+    // update bankroll outside setBets to avoid double-call in StrictMode
+    try {
+      const current = parseFloat(localStorage.getItem(LS_BANKROLL) || '0') || 0;
+      let next = current;
+      if (old.result === 'won') next -= +(old.amount * old.odds).toFixed(2);
+      if (result === 'won') next += +(old.amount * old.odds).toFixed(2);
+      next = +next.toFixed(2);
+      localStorage.setItem(LS_BANKROLL, String(next));
+      window.dispatchEvent(new Event('bankroll-updated'));
+    } catch {}
+
     setBets((prev) => prev.map((b) => b.id === id ? { ...b, result } : b));
   }
 
